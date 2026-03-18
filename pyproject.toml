@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pdnl_extract"
+version = "0.1"
+authors = [
+  { name="Noah Capp", email="noahmcapp@gmail.com" },
+]
+description = "PDNL Extract"
+dependencies = [
+	"geojson",
+	"pdnl_sana",
+	"cryptography==41.0.7",
+	"phas",
+	"pip-system-certs",
+]
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Development Status :: 4 - Beta",
+    "Topic :: Scientific/Engineering :: Medical Science Apps."
+]
+
+[project.urls]
+Homepage = "https://github.com/PennCompPathology/pdnl_extract"
+
+[project.scripts]
+pdnl_extract = "pdnl_extract:main"
