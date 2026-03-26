@@ -20,10 +20,19 @@ def read_geojson(f):
     annotations = []
     data = geojson.load(open(f, 'r'))
     for ann in data['features']:
-        xy = np.array(ann['geometry']['coordinates'])
+        xy = np.squeeze(np.array(ann['geometry']['coordinates']))
         cls = ann['properties']['classification']['name']
         annotation = pdnl_sana.geo.Annotation(*xy.T, class_name=cls, level=0)
+
+        # shape checking
+        if (len(annotation.shape) != 2) or \
+           (annotation.shape[0] < 2) or \
+           (annotation.shape[1] != 2):
+            print(f"ERROR: Improper polygon -- {annotation.shape} | {annotation.class_name}")
+            exit()
+        
         annotations.append(annotation)
+        
     return annotations
 
 def main():
@@ -45,33 +54,38 @@ def main():
 
     # extract the PNG from the slide file
     if args.mode == 'local':
-        
+
+        # cmdl parsing
         if not os.path.exists(args.slide):
             print(f'ERROR: Slide does not exist -- {args.slide}')
             exit()
-
         if not os.path.exists(args.annotation):
             print(f'ERROR: Annotation does not exist -- {args.annotation}')
             exit()
 
+        # load the polygons
         annotations = read_geojson(args.annotation)
 
-        classes = [x.class_name for x in annotations]
-
+        # basic ROI loading
         if len(annotations) == 1:
             segments = None
             roi = annotations[0].to_polygon()
 
+        # GM SEG loading
         elif len(annotations) == 4 and all(map(lambda x: x in classes, SEG_CLASSES)):
+            classes = [x.class_name for x in annotations]            
             segments = [[x.to_curve() for x in annotations if x.class_name == cls][0] for cls in SEG_CLASSES]
             segments = pdnl_sana.interpolate.clip_quadrilateral_segments(*segments)
             roi = pdnl_sana.geo.connect_segments(*segments)
+            
         else:
             print(f'ERROR: Unrecognized annotation format -- {"|".join([(x.class_name, x.annotation_name) for x in annotations])}')
             exit()
 
+        # prepare slide I/O
         loader = pdnl_sana.slide.Loader(logger, args.slide)
 
+        # pixel resolution
         if args.level is None:
             level_ds = ', '.join([f'[level={level}|ds={loader.ds[level]}]' for level in range(len(loader.ds))])
             print(f'INFO: Available levels: {loader.mpp} -- {level_ds}')
@@ -79,27 +93,40 @@ def main():
         else:
             level = args.level
 
-        [loader.converter.rescale(x, level) for x in segments]
+        # transform the polygons into the correct resolution
+        if segments:
+            [loader.converter.rescale(x, level) for x in segments]
         loader.converter.rescale(roi, level)
 
+        # slide I/O
         frame = loader.load_frame_with_roi(roi, level=level)
-        [pdnl_sana.geo.transform_array_with_logger(x, logger) for x in segments]
+
+        # transform the polygons into the frame coordinate system
+        if segments:
+            [pdnl_sana.geo.transform_array_with_logger(x, logger) for x in segments]
         pdnl_sana.geo.transform_array_with_logger(roi, logger)
+
+        # create a mask based on the user's annotation
         mask = pdnl_sana.image.create_mask_like(frame, [roi])
 
+        # plotting
         if args.debug:
             fig, axs = plt.subplots(1,2)
             ax = axs[0]
             axs[0].imshow(frame.img)
-            [axs[0].plot(*x.T) for x in segments]
+            if segments:
+                [axs[0].plot(*x.T) for x in segments]
         else:
             ax = None
 
+        # cortical deformation
         if not segments is None:
             sample_grid, _ = pdnl_sana.interpolate.fan_sample(*segments, ax=ax)
             if args.debug:
                 deform = pdnl_sana.interpolate.grid_sample(frame, sample_grid)
                 axs[1].imshow(deform.img)
+        else:
+            sample_grid = None    
 
     # extract the PNG using the API
     else:
@@ -176,9 +203,13 @@ def main():
         # TODO: smooth polygon and save deformation curve
         sample_grid = None
 
+    # show the plots
     if args.debug:
         plt.show()
+
+    # save the results!
     else:
+        os.makedirs(args.output_directory, exist_ok=True)
         frame.save(os.path.join(args.output_directory, 'frame.png'))
         mask.save(os.path.join(args.output_directory, 'mask.png'))
         logger.write_data()
