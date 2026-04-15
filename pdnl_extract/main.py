@@ -43,6 +43,7 @@ def main():
     parser.add_argument('-a', '--annotation', type=str, help="path to geojson annotation, or annotation ID")
     parser.add_argument('-o', '--output_directory', type=str, help="path to write output data to")
     parser.add_argument('-l', '--level', help="resolution to load the image data at", default=None, type=int)
+    parser.add_argument('--chunk_size', type=int, default=1024, help="size of chunk PNG to write")
     parser.add_argument('--url', help='URL path to the API')
     parser.add_argument('--api_key', help='API key providing user level access')
     parser.add_argument('--project_id', help='API project name')
@@ -52,7 +53,7 @@ def main():
 
     logger = pdnl_sana.logging.Logger('normal', os.path.join(args.output_directory,'log.pkl'))
 
-    # extract the PNG from the slide file
+    # extract the data from the slide file
     if args.mode == 'local':
 
         # cmdl parsing
@@ -67,6 +68,7 @@ def main():
         annotations = read_geojson(args.annotation)
 
         # basic ROI loading
+        # TODO: define class name???
         if len(annotations) == 1:
             segments = None
             roi = annotations[0].to_polygon()
@@ -98,6 +100,23 @@ def main():
             [loader.converter.rescale(x, level) for x in segments]
         loader.converter.rescale(roi, level)
 
+        size = pdnl_sana.geo.Point(args.chunk_size, args.chunk_size, level=args.level, is_micron=False)
+        framer = pdnl_sana.slide.Framer(loader, size=size, level=args.level, rois=[roi])
+        for j in range(framer.nframes[0]):
+            for i in range(framer.nframes[1]):
+                mask = framer.load_mask(i, j)
+                if np.sum(mask.img) != 0:
+                    frame = framer.load_frame(i, j)
+
+                    os.makedirs(args.output_directory, exist_ok=True)
+                    out_d = os.path.join(args.output_directory, 'chunks', f'{i}_{j}')
+                    os.makedirs(out_d, exist_ok=True)
+                    frame.save(os.path.join(out_d, 'frame.png'))
+                    mask.save(os.path.join(out_d, 'mask.png'))
+                    logger.fpath = os.path.join(out_d, 'log.pkl')
+                    logger.write_data()
+        return
+                    
         # slide I/O
         frame = loader.load_frame_with_roi(roi, level=level)
 
