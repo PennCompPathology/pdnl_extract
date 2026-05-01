@@ -4,6 +4,7 @@ import sys
 
 import argparse
 import geojson
+from tqdm import tqdm
 import numpy as np
 import pdnl_sana.geo
 import pdnl_sana.interpolate
@@ -20,8 +21,17 @@ def read_geojson(f):
     annotations = []
     data = geojson.load(open(f, 'r'))
     for ann in data['features']:
+        
         xy = np.squeeze(np.array(ann['geometry']['coordinates']))
-        cls = ann['properties']['classification']['name']
+        #cls = ann['properties']['classification']['name']
+        try:
+            cls = ann['properties']['classification']['name']
+        except:
+            try:
+                cls = ann['properties']['name']
+            except:
+                cls = None
+
         annotation = pdnl_sana.geo.Annotation(*xy.T, class_name=cls, level=0)
 
         # shape checking
@@ -42,6 +52,7 @@ def main():
     parser.add_argument('-s', '--slide', type=str, help="path to slidename, or slide ID")
     parser.add_argument('-a', '--annotation', type=str, help="path to geojson annotation, or annotation ID")
     parser.add_argument('-o', '--output_directory', type=str, help="path to write output data to")
+    parser.add_argument('-c', '--classes', nargs='*', type=str, help="list of ROI class names to look for", default=[])
     parser.add_argument('-l', '--level', help="resolution to load the image data at", default=None, type=int)
     parser.add_argument('--chunk_size', type=int, default=1024, help="size of chunk PNG to write")
     parser.add_argument('--url', help='URL path to the API')
@@ -66,13 +77,28 @@ def main():
 
         # load the polygons
         annotations = read_geojson(args.annotation)
+        orig = [x.class_name for x in annotations]
+        
+        # filter by class names
+        annotations = [x for x in annotations if x.class_name in args.classes]
 
         # basic ROI loading
-        # TODO: define class name???
-        if len(annotations) == 1:
+        if len(annotations) == 1 or True:
             segments = None
-            roi = annotations[0].to_polygon()
-
+            rois = {}
+            for class_name in args.classes:
+                try:
+                    roi = [x for x in annotations if x.class_name == class_name][0]
+                    if not class_name in rois:
+                        rois[class_name] = []
+                    rois[class_name].append(roi)
+                except:
+                    pass
+            if len(rois) == 0:
+                anno_classes = set([x.class_name for x in annotations])
+                print(f'ERROR: Available classes {anno_classes} not found in argument classes {args.classes}')
+                exit()
+                
         # GM SEG loading
         elif len(annotations) == 4 and all(map(lambda x: x in classes, SEG_CLASSES)):
             classes = [x.class_name for x in annotations]            
@@ -90,7 +116,7 @@ def main():
         # pixel resolution
         if args.level is None:
             level_ds = ', '.join([f'[level={level}|ds={loader.ds[level]}]' for level in range(len(loader.ds))])
-            print(f'INFO: Available levels: {loader.mpp} -- {level_ds}')
+            print(f'INFO: Available levels: MPP={loader.mpp} -- {level_ds}')
             exit()
         else:
             level = args.level
@@ -98,23 +124,31 @@ def main():
         # transform the polygons into the correct resolution
         if segments:
             [loader.converter.rescale(x, level) for x in segments]
-        loader.converter.rescale(roi, level)
+        for key in rois:
+            for roi in rois[key]:
+                loader.converter.rescale(roi, level)
+
+        os.makedirs(args.output_directory, exist_ok=True)
+        os.makedirs(os.path.join(args.output_directory, 'chunks'), exist_ok=True)
 
         size = pdnl_sana.geo.Point(args.chunk_size, args.chunk_size, level=args.level, is_micron=False)
-        framer = pdnl_sana.slide.Framer(loader, size=size, level=args.level, rois=[roi])
-        for j in range(framer.nframes[0]):
-            for i in range(framer.nframes[1]):
-                mask = framer.load_mask(i, j)
-                if np.sum(mask.img) != 0:
-                    frame = framer.load_frame(i, j)
+        framer = pdnl_sana.slide.Framer(loader, size=size, level=args.level, rois=rois)
+        chunk_idxs = [(j,i) for j in range(framer.nframes[0]) for i in range(framer.nframes[1])]
+        for (j,i) in tqdm(chunk_idxs):
+            mask, roi_masks = framer.load_mask(i, j)
+            if np.sum(mask.img) != 0:
+                frame = framer.load_frame(i, j)
 
-                    os.makedirs(args.output_directory, exist_ok=True)
-                    out_d = os.path.join(args.output_directory, 'chunks', f'{i}_{j}')
-                    os.makedirs(out_d, exist_ok=True)
-                    frame.save(os.path.join(out_d, 'frame.png'))
-                    mask.save(os.path.join(out_d, 'mask.png'))
-                    logger.fpath = os.path.join(out_d, 'log.pkl')
-                    logger.write_data()
+                out_d = os.path.join(args.output_directory, 'chunks', f'{i}_{j}')
+                os.makedirs(out_d, exist_ok=True)
+                frame.save(os.path.join(out_d, 'frame.png'))
+
+                # TODO: should probably save compressed
+                mask.save(os.path.join(out_d, 'mask.png'))
+                for key in roi_masks:
+                    roi_masks[key].save(os.path.join(out_d, f'mask_{key}.png'))
+                logger.fpath = os.path.join(out_d, 'log.pkl')
+                logger.write_data()
         return
                     
         # slide I/O

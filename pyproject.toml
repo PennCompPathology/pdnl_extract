@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pdnl_extract"
-version = "0.3"
+version = "0.4"
 authors = [
   { name="Noah Capp", email="noahmcapp@gmail.com" },
 ]
@@ -12,9 +12,8 @@ description = "PDNL Extract"
 dependencies = [
 	"geojson",
 	"pdnl_sana",
-	"cryptography==41.0.7",
 	"phas",
-	"pip-system-certs",
+	"tqdm",
 ]
 readme = "README.md"
 requires-python = ">=3.10"
