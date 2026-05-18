@@ -63,7 +63,7 @@ def main():
     args = parser.parse_args()
 
     logger = pdnl_sana.logging.Logger('normal', os.path.join(args.output_directory,'log.pkl'))
-
+    
     # extract the data from the slide file
     if args.mode == 'local':
 
@@ -78,10 +78,10 @@ def main():
         # load the polygons
         annotations = read_geojson(args.annotation)
         orig = [x.class_name for x in annotations]
-        
+
         # filter by class names
         annotations = [x for x in annotations if x.class_name in args.classes]
-
+        
         # basic ROI loading
         if len(annotations) == 1 or True:
             segments = None
@@ -128,15 +128,30 @@ def main():
             for roi in rois[key]:
                 loader.converter.rescale(roi, level)
 
+        if args.debug:
+            fig, ax = plt.subplots(1,1)
+            tb = loader.load_thumbnail()
+            ax.imshow(tb.img)
+
+            for key in rois:
+                for roi in rois[key]:
+                    loader.converter.rescale(roi, tb.level)
+                    ax.plot(*roi.T, label=roi.class_name)
+                    loader.converter.rescale(roi, level)
+            ax.legend()
+            plt.show()
+
         os.makedirs(args.output_directory, exist_ok=True)
         os.makedirs(os.path.join(args.output_directory, 'chunks'), exist_ok=True)
 
         size = pdnl_sana.geo.Point(args.chunk_size, args.chunk_size, level=args.level, is_micron=False)
         framer = pdnl_sana.slide.Framer(loader, size=size, level=args.level, rois=rois)
-        chunk_idxs = [(j,i) for j in range(framer.nframes[0]) for i in range(framer.nframes[1])]
-        for (j,i) in tqdm(chunk_idxs):
+        chunk_idxs = [(i,j) for i in range(framer.nframes[0]) for j in range(framer.nframes[1])]
+
+        for (i,j) in tqdm(chunk_idxs):
             mask, roi_masks = framer.load_mask(i, j)
             if np.sum(mask.img) != 0:
+                
                 frame = framer.load_frame(i, j)
 
                 out_d = os.path.join(args.output_directory, 'chunks', f'{i}_{j}')
@@ -145,6 +160,7 @@ def main():
 
                 # TODO: should probably save compressed
                 mask.save(os.path.join(out_d, 'mask.png'))
+
                 for key in roi_masks:
                     roi_masks[key].save(os.path.join(out_d, f'mask_{key}.png'))
                 logger.fpath = os.path.join(out_d, 'log.pkl')
