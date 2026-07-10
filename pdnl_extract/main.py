@@ -20,19 +20,24 @@ SEG_CLASSES = ['CSF', 'R', 'GM', 'L']
 def read_geojson(f):
     annotations = []
     data = geojson.load(open(f, 'r'))
-    for ann in data['features']:
+    if 'features' in data:
+        data = data['features']
+    for ann in data:
         
-        xy = np.squeeze(np.array(ann['geometry']['coordinates']))
+        xy = np.squeeze(np.array(ann['geometry']['coordinates'])).astype(float)
         #cls = ann['properties']['classification']['name']
         try:
             cls = ann['properties']['classification']['name']
+            name = ann['properties']['name']
         except:
             try:
                 cls = ann['properties']['name']
+                name = None
             except:
                 cls = None
+                name = None
 
-        annotation = pdnl_sana.geo.Annotation(*xy.T, class_name=cls, level=0)
+        annotation = pdnl_sana.geo.Annotation(*xy.T, class_name=cls, annotation_name=name, level=0)
 
         # shape checking
         if (len(annotation.shape) != 2) or \
@@ -53,16 +58,20 @@ def main():
     parser.add_argument('-a', '--annotation', type=str, help="path to geojson annotation, or annotation ID")
     parser.add_argument('-o', '--output_directory', type=str, help="path to write output data to")
     parser.add_argument('-c', '--classes', nargs='*', type=str, help="list of ROI class names to look for", default=[])
+    parser.add_argument('--seg_classes', nargs=4, default=SEG_CLASSES)
     parser.add_argument('-l', '--level', help="resolution to load the image data at", default=None, type=int)
     parser.add_argument('--chunk_size', type=int, default=1024, help="size of chunk PNG to write")
     parser.add_argument('--url', help='URL path to the API')
     parser.add_argument('--api_key', help='API key providing user level access')
     parser.add_argument('--project_id', help='API project name')
     parser.add_argument('--task_id', help='API task name')
+    parser.add_argument('--deform', action='store_true')
     parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
 
     logger = pdnl_sana.logging.Logger('normal', os.path.join(args.output_directory,'log.pkl'))
+
+    print(f'{args.slide}')
     
     # extract the data from the slide file
     if args.mode == 'local':
@@ -80,11 +89,13 @@ def main():
         orig = [x.class_name for x in annotations]
 
         # filter by class names
-        annotations = [x for x in annotations if x.class_name in args.classes]
+        annotations = [x for x in annotations if x.class_name in args.classes or x.class_name in args.seg_classes]
+        if len(annotations) == 0:
+            exit()
         
         # basic ROI loading
-        if len(annotations) == 1 or True:
-            segments = None
+        if len(annotations) == 1 and not args.deform:
+            segmentations = None
             rois = {}
             for class_name in args.classes:
                 try:
@@ -98,16 +109,32 @@ def main():
                 anno_classes = set([x.class_name for x in annotations])
                 print(f'ERROR: Available classes {anno_classes} not found in argument classes {args.classes}')
                 exit()
-                
+
         # GM SEG loading
-        elif len(annotations) == 4 and all(map(lambda x: x in classes, SEG_CLASSES)):
-            classes = [x.class_name for x in annotations]            
-            segments = [[x.to_curve() for x in annotations if x.class_name == cls][0] for cls in SEG_CLASSES]
-            segments = pdnl_sana.interpolate.clip_quadrilateral_segments(*segments)
-            roi = pdnl_sana.geo.connect_segments(*segments)
-            
+        elif len(annotations) % 4 == 0 and all(map(lambda x: x.class_name in args.seg_classes, annotations)) and args.deform:
+
+            annotation_names = set([x.annotation_name for x in annotations])
+            rois, segmentations = {}, {}
+            for name in annotation_names:
+                try:
+                    segments = [[x.to_curve() for x in annotations if x.class_name == cls and x.annotation_name == name][0] for cls in args.seg_classes]
+                except:
+                    print(f"WARNING: Incomplete annotation -- {name}")
+                    continue
+                try:
+                    segments = pdnl_sana.interpolate.clip_quadrilateral_segments(*segments)
+                except:
+                    print(f"WARNING: Invalid segments -- {name}")
+                    continue
+                roi = pdnl_sana.geo.connect_segments(*segments)
+                if not name in rois:
+                    rois[name] = []
+                    segmentations[name] = []
+                rois[name].append(roi)
+                segmentations[name].append(segments)
         else:
-            print(f'ERROR: Unrecognized annotation format -- {"|".join([(x.class_name, x.annotation_name) for x in annotations])}')
+            
+            print(f"ERROR: Unrecognized annotation format -- {[(x.class_name, x.annotation_name) for x in annotations]}")
             exit()
 
         # prepare slide I/O
@@ -122,11 +149,13 @@ def main():
             level = args.level
 
         # transform the polygons into the correct resolution
-        if segments:
-            [loader.converter.rescale(x, level) for x in segments]
-        for key in rois:
-            for roi in rois[key]:
-                loader.converter.rescale(roi, level)
+        # for key in rois:
+        #     for roi in rois[key]:
+        #         loader.converter.rescale(roi, level)
+        # if segmentations:
+        #     for key in segmentations:
+        #         for segments in segmentations[key]:
+        #             [loader.converter.rescale(x, level) for x in segments]
 
         if args.debug:
             fig, ax = plt.subplots(1,1)
@@ -136,13 +165,43 @@ def main():
             for key in rois:
                 for roi in rois[key]:
                     loader.converter.rescale(roi, tb.level)
-                    ax.plot(*roi.T, label=roi.class_name)
+                    ax.plot(*roi.T, label=key)
                     loader.converter.rescale(roi, level)
             ax.legend()
-            plt.show()
+
+            if segmentations:
+                fig, ax = plt.subplots(1,1)
+                ax.imshow(tb.img)
+                for key in segmentations:
+                    for segments in segmentations[key]:
+                        for x in segments:
+                            loader.converter.rescale(x, tb.level)
+                            ax.plot(*x.T)
+                            loader.converter.rescale(x, level)
+                            
+        if not segmentations:
+            exit()
+
+        if args.debug:
+            fig, ax = plt.subplots(1,1)
+            w, h = loader.level_dimensions[0]
+            ax.imshow(tb.img, extent=(0,w,h,0))
 
         os.makedirs(args.output_directory, exist_ok=True)
         os.makedirs(os.path.join(args.output_directory, 'chunks'), exist_ok=True)
+            
+        for key in tqdm(segmentations):
+            for i in range(len(rois[key])):
+                roi = rois[key][i]
+                segments = segmentations[key][i]
+                out_annos = [roi.to_annotation(class_name='ROI', annotation_name=key)]
+                for x, cls in zip(segments, args.seg_classes):
+                    out_annos.append(x.to_annotation(class_name=cls, annotation_name=key))
+                #sample_grid, _ = pdnl_sana.interpolate.fan_sample(*segments)
+                #np.save(os.path.join(args.output_directory, f'{key}.npy'), sample_grid)
+                with open(os.path.join(args.output_directory, f'{key}.geojson'), 'w') as fp:
+                    geojson.dump([x.to_geojson() for x in out_annos], fp)
+                
 
         size = pdnl_sana.geo.Point(args.chunk_size, args.chunk_size, level=args.level, is_micron=False)
         framer = pdnl_sana.slide.Framer(loader, size=size, level=args.level, rois=rois)
@@ -165,15 +224,20 @@ def main():
                     roi_masks[key].save(os.path.join(out_d, f'mask_{key}.png'))
                 logger.fpath = os.path.join(out_d, 'log.pkl')
                 logger.write_data()
+
         return
-                    
-        # slide I/O
-        frame = loader.load_frame_with_roi(roi, level=level)
+    
+        for key in rois:
+            # slide I/O
+            frame = loader.load_frame_with_roi(roi, level=level)
 
         # transform the polygons into the frame coordinate system
-        if segments:
-            [pdnl_sana.geo.transform_array_with_logger(x, logger) for x in segments]
-        pdnl_sana.geo.transform_array_with_logger(roi, logger)
+        if segmentations:
+            for key in segmentations:
+                for segments in segmentations[key]:
+                    [pdnl_sana.geo.transform_array_with_logger(x, logger) for x in segments]
+                for roi in rois[key]:
+                    pdnl_sana.geo.transform_array_with_logger(roi, logger)
 
         # create a mask based on the user's annotation
         mask = pdnl_sana.image.create_mask_like(frame, [roi])
