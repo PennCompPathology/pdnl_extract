@@ -17,7 +17,7 @@ from matplotlib import pyplot as plt
 
 SEG_CLASSES = ['CSF', 'R', 'GM', 'L']
 
-def read_geojson(f):
+def read_geojson(f, level=0):
     annotations = []
     data = geojson.load(open(f, 'r'))
     if 'features' in data:
@@ -36,8 +36,7 @@ def read_geojson(f):
             except:
                 cls = None
                 name = None
-
-        annotation = pdnl_sana.geo.Annotation(*xy.T, class_name=cls, annotation_name=name, level=0)
+        annotation = pdnl_sana.geo.Annotation(*xy.T, class_name=cls, annotation_name=name, level=level)
 
         # shape checking
         if (len(annotation.shape) != 2) or \
@@ -60,6 +59,7 @@ def main():
     parser.add_argument('-c', '--classes', nargs='*', type=str, help="list of ROI class names to look for", default=[])
     parser.add_argument('--seg_classes', nargs=4, default=SEG_CLASSES)
     parser.add_argument('-l', '--level', help="resolution to load the image data at", default=None, type=int)
+    parser.add_argument('--annotation_level', type=int, default=0, help="level of the annotations stored in the .geojson")
     parser.add_argument('--chunk_size', type=int, default=1024, help="size of chunk PNG to write")
     parser.add_argument('--url', help='URL path to the API')
     parser.add_argument('--api_key', help='API key providing user level access')
@@ -85,18 +85,19 @@ def main():
             exit()
 
         # load the polygons
-        annotations = read_geojson(args.annotation)
+        annotations = read_geojson(args.annotation, level=args.annotation_level)
         orig = [x.class_name for x in annotations]
-
+        
         # filter by class names
         annotations = [x for x in annotations if x.class_name in args.classes or x.class_name in args.seg_classes]
         if len(annotations) == 0:
             exit()
         
-        # basic ROI loading
-        if len(annotations) == 1 and not args.deform:
-            segmentations = None
-            rois = {}
+        segmentations = {}
+        rois = {}
+
+        # basic ROI loading        
+        if len(args.classes) != 0:
             for class_name in args.classes:
                 try:
                     roi = [x for x in annotations if x.class_name == class_name][0]
@@ -110,22 +111,20 @@ def main():
                 print(f'ERROR: Available classes {anno_classes} not found in argument classes {args.classes}')
                 exit()
 
-        # GM SEG loading
-        elif len(annotations) % 4 == 0 and all(map(lambda x: x.class_name in args.seg_classes, annotations)) and args.deform:
-
-            annotation_names = set([x.annotation_name for x in annotations])
-            rois, segmentations = {}, {}
+        seg_annotations = [x for x in annotations if x.class_name in args.seg_classes]
+        if len(seg_annotations) % 4 == 0:
+            annotation_names = set([x.annotation_name for x in seg_annotations])
             for name in annotation_names:
                 try:
-                    segments = [[x.to_curve() for x in annotations if x.class_name == cls and x.annotation_name == name][0] for cls in args.seg_classes]
+                    segments = [[x.to_curve() for x in seg_annotations if x.class_name == cls and x.annotation_name == name][0] for cls in args.seg_classes]
                 except:
                     print(f"WARNING: Incomplete annotation -- {name}")
                     continue
                 try:
                     segments = pdnl_sana.interpolate.clip_quadrilateral_segments(*segments)
-                except:
-                    print(f"WARNING: Invalid segments -- {name}")
-                    continue
+                except Exception as e:
+                    print(f"WARNING: Potentially invalid segments -- {name}")
+                    
                 roi = pdnl_sana.geo.connect_segments(*segments)
                 if not name in rois:
                     rois[name] = []
@@ -133,8 +132,7 @@ def main():
                 rois[name].append(roi)
                 segmentations[name].append(segments)
         else:
-            
-            print(f"ERROR: Unrecognized annotation format -- {[(x.class_name, x.annotation_name) for x in annotations]}")
+            print(f"ERROR: Unrecognized annotation format -- {[(x.class_name, x.annotation_name) for x in seg_annotations]}")
             exit()
 
         # prepare slide I/O
@@ -174,19 +172,13 @@ def main():
                 ax.imshow(tb.img)
                 for key in segmentations:
                     for segments in segmentations[key]:
-                        for x in segments:
+                        for i, x in enumerate(segments):
                             loader.converter.rescale(x, tb.level)
-                            ax.plot(*x.T)
+                            ax.plot(*x.T, label=args.seg_classes[i])
                             loader.converter.rescale(x, level)
+                ax.legend()
+            plt.show()
                             
-        if not segmentations:
-            exit()
-
-        if args.debug:
-            fig, ax = plt.subplots(1,1)
-            w, h = loader.level_dimensions[0]
-            ax.imshow(tb.img, extent=(0,w,h,0))
-
         os.makedirs(args.output_directory, exist_ok=True)
         os.makedirs(os.path.join(args.output_directory, 'chunks'), exist_ok=True)
             
@@ -197,6 +189,8 @@ def main():
                 out_annos = [roi.to_annotation(class_name='ROI', annotation_name=key)]
                 for x, cls in zip(segments, args.seg_classes):
                     out_annos.append(x.to_annotation(class_name=cls, annotation_name=key))
+                for x in out_annos:
+                    loader.converter.rescale(x, level=0)
                 #sample_grid, _ = pdnl_sana.interpolate.fan_sample(*segments)
                 #np.save(os.path.join(args.output_directory, f'{key}.npy'), sample_grid)
                 with open(os.path.join(args.output_directory, f'{key}.geojson'), 'w') as fp:
